@@ -58,8 +58,11 @@ func fetchMinTimestamp(ctx context.Context, collection *mongo.Collection) (time.
 	}
 
 	// Only retrieve the last document sorted by `_id` in descending order and select only the `MinTimestamp` field
-	opts := options.FindOne().SetSort(bson.D{{Key: "_id", Value: -1}})
-	err := collection.FindOne(ctx, bson.D{}, opts).SetProjection(bson.D{{Key: "MinTimestamp", Value: 1}}).Decode(&result)
+	opts := options.FindOne().
+		SetSort(bson.D{{Key: "_id", Value: -1}}).
+		SetProjection(bson.D{{Key: "MinTimestamp", Value: 1}})  // Correctly setting the projection here
+
+	err := collection.FindOne(ctx, bson.D{}, opts).Decode(&result)
 	if err != nil {
 		return time.Time{}, err
 	}
