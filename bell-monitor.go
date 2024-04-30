@@ -18,12 +18,18 @@ var interval = flag.Int("interval", 1, "Interval in minutes to check the delay")
 
 func main() {
 	flag.Parse()
+
+	if *pushAddr == "" {
+		log.Fatal("Pushgateway address is required")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	log.Printf("Connecting to MongoDB at %s", *mongoDSN)
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(*mongoDSN).SetConnectTimeout(10*time.Second).SetSocketTimeout(10*time.Second))
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to connect to MongoDB: %v", err)
 	}
 	defer client.Disconnect(ctx)
 
@@ -32,16 +38,20 @@ func main() {
 	ticker := time.NewTicker(time.Duration(*interval) * time.Minute)
 	defer ticker.Stop()
 
+	log.Println("Starting the monitoring loop")
 	for range ticker.C {
 		minTimestamp, err := fetchMinTimestamp(ctx, collection)
 		if err != nil {
-			log.Println("Error fetching MinTimestamp:", err)
+			log.Printf("Error fetching MinTimestamp: %v", err)
 			continue
 		}
 
 		currentTime := time.Now()
 		diff := currentTime.Sub(minTimestamp).Seconds()
+		log.Printf("Fetched MinTimestamp: %v, current time: %v, diff: %v seconds", minTimestamp, currentTime, diff)
+
 		prometh.Push(*pushAddr, diff, "main-net")
+		log.Printf("Pushed metric with difference %v seconds to Pushgateway at %s", diff, *pushAddr)
 	}
 }
 
