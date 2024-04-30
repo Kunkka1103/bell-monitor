@@ -21,7 +21,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(*mongoDSN))
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(*mongoDSN).SetConnectTimeout(10*time.Second).SetSocketTimeout(10*time.Second))
 	if err != nil {
 		log.Fatal(err)
 	}
