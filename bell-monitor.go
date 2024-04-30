@@ -19,26 +19,24 @@ var interval = flag.Int("interval", 1, "Interval in minutes to check the delay")
 func main() {
 	flag.Parse()
 
-	if *pushAddr == "" {
-		log.Fatal("Pushgateway address is required")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	log.Printf("Connecting to MongoDB at %s", *mongoDSN)
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(*mongoDSN).SetConnectTimeout(10*time.Second).SetSocketTimeout(10*time.Second))
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(*mongoDSN))
 	if err != nil {
-		log.Fatalf("Failed to connect to MongoDB: %v", err)
+		log.Fatalf("Error connecting to MongoDB: %v", err)
 	}
-	defer client.Disconnect(ctx)
+	defer func() {
+		if err := client.Disconnect(ctx); err != nil {
+			log.Printf("Error disconnecting from MongoDB: %v", err)
+		}
+	}()
 
 	collection := client.Database("bell").Collection("Tipset")
 
 	ticker := time.NewTicker(time.Duration(*interval) * time.Minute)
 	defer ticker.Stop()
 
-	log.Println("Starting the monitoring loop")
 	for range ticker.C {
 		minTimestamp, err := fetchMinTimestamp(ctx, collection)
 		if err != nil {
@@ -48,10 +46,9 @@ func main() {
 
 		currentTime := time.Now()
 		diff := currentTime.Sub(minTimestamp).Seconds()
-		log.Printf("Fetched MinTimestamp: %v, current time: %v, diff: %v seconds", minTimestamp, currentTime, diff)
-
+		log.Printf("Time difference: %v seconds", diff)
+		// Assuming prometh.Push function exists and properly sends the data to Pushgateway.
 		prometh.Push(*pushAddr, diff, "main-net")
-		log.Printf("Pushed metric with difference %v seconds to Pushgateway at %s", diff, *pushAddr)
 	}
 }
 
@@ -60,8 +57,9 @@ func fetchMinTimestamp(ctx context.Context, collection *mongo.Collection) (time.
 		MinTimestamp time.Time `bson:"MinTimestamp"`
 	}
 
+	// Only retrieve the last document sorted by `_id` in descending order and select only the `MinTimestamp` field
 	opts := options.FindOne().SetSort(bson.D{{Key: "_id", Value: -1}})
-	err := collection.FindOne(ctx, bson.D{}, opts).Decode(&result)
+	err := collection.FindOne(ctx, bson.D{}, opts).SetProjection(bson.D{{Key: "MinTimestamp", Value: 1}}).Decode(&result)
 	if err != nil {
 		return time.Time{}, err
 	}
