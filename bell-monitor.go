@@ -5,6 +5,10 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -12,9 +16,9 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-var mongoDSN = flag.String("mongo-dsn", "mongodb://localhost:27017", "MongoDB DSN")
-var pushAddr = flag.String("push-address", "", "Address of the Pushgateway to send metrics")
-var interval = flag.Int("interval", 1, "Interval in minutes to check the delay")
+var mongoDSN = flag.String("mongo-dsn", getEnv("MONGO_DSN", "mongodb://localhost:27017"), "MongoDB DSN")
+var pushAddr = flag.String("push-address", getEnv("PUSH_ADDRESS", ""), "Address of the Pushgateway to send metrics")
+var interval = flag.Int("interval", getEnvAsInt("INTERVAL", 1), "Interval in minutes to check the delay")
 
 func main() {
 	flag.Parse()
@@ -22,13 +26,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(*mongoDSN))
+	client, err := connectWithRetry(ctx, *mongoDSN, 5)
 	if err != nil {
-		log.Fatalf("Error connecting to MongoDB: %v", err)
+		log.Fatalf("连接 MongoDB 出错: %v", err)
 	}
 	defer func() {
 		if err := client.Disconnect(ctx); err != nil {
-			log.Printf("Error disconnecting from MongoDB: %v", err)
+			log.Printf("断开 MongoDB 连接出错: %v", err)
 		}
 	}()
 
@@ -37,19 +41,35 @@ func main() {
 	ticker := time.NewTicker(time.Duration(*interval) * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		minTimestamp, err := fetchMinTimestamp(ctx, collection)
-		if err != nil {
-			log.Printf("Error fetching MinTimestamp: %v", err)
-			continue
-		}
+	// 处理优雅停机
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan bool)
 
-		currentTime := time.Now()
-		diff := currentTime.Sub(minTimestamp).Seconds()
-		log.Printf("Time difference: %v seconds", diff)
-		// Assuming prometh.Push function exists and properly sends the data to Pushgateway.
-		prometh.Push(*pushAddr, diff, "main-net")
-	}
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				minTimestamp, err := fetchMinTimestamp(ctx, collection)
+				if err != nil {
+					log.Printf("获取 MinTimestamp 出错: %v", err)
+					continue
+				}
+
+				currentTime := time.Now()
+				diff := currentTime.Sub(minTimestamp).Seconds()
+				log.Printf("时间差: %v 秒", diff)
+				// 假设 prometh.Push 函数存在并能正确发送数据到 Pushgateway。
+				prometh.Push(*pushAddr, diff, "main-net")
+			case <-stop:
+				done <- true
+				return
+			}
+		}
+	}()
+
+	<-done
+	log.Println("程序已优雅地退出")
 }
 
 func fetchMinTimestamp(ctx context.Context, collection *mongo.Collection) (time.Time, error) {
@@ -57,14 +77,44 @@ func fetchMinTimestamp(ctx context.Context, collection *mongo.Collection) (time.
 		MinTimestamp time.Time `bson:"MinTimestamp"`
 	}
 
-	// Only retrieve the last document sorted by `_id` in descending order and select only the `MinTimestamp` field
+	// 仅检索按 `_id` 降序排列的最后一个文档，并仅选择 `MinTimestamp` 字段
 	opts := options.FindOne().
 		SetSort(bson.D{{Key: "_id", Value: -1}}).
-		SetProjection(bson.D{{Key: "MinTimestamp", Value: 1}})  // Correctly setting the projection here
+		SetProjection(bson.D{{Key: "MinTimestamp", Value: 1}})
 
 	err := collection.FindOne(ctx, bson.D{}, opts).Decode(&result)
 	if err != nil {
 		return time.Time{}, err
 	}
 	return result.MinTimestamp, nil
+}
+
+func connectWithRetry(ctx context.Context, dsn string, retries int) (*mongo.Client, error) {
+	var client *mongo.Client
+	var err error
+	for i := 0; i < retries; i++ {
+		client, err = mongo.Connect(ctx, options.Client().ApplyURI(dsn))
+		if err == nil {
+			return client, nil
+		}
+		log.Printf("连接 MongoDB 失败，重试 %d/%d: %v", i+1, retries, err)
+		time.Sleep(2 * time.Second)
+	}
+	return nil, err
+}
+
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return fallback
+}
+
+func getEnvAsInt(name string, defaultVal int) int {
+	if valueStr, exists := os.LookupEnv(name); exists {
+		if value, err := strconv.Atoi(valueStr); err == nil {
+			return value
+		}
+	}
+	return defaultVal
 }
